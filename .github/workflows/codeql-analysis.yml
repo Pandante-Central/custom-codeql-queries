@@ -1,0 +1,86 @@
+name: "CodeQL Auto Language"
+
+on:
+  # push:
+  #   branches: [ main ]
+  # pull_request:
+  #   branches: [ main ]
+  schedule:
+    - cron: '17 19 * * 6'
+  workflow_dispatch:
+
+jobs:
+  create-matrix:
+    runs-on: ubuntu-latest
+    permissions:
+      # required for all workflows
+      security-events: write
+
+      # required to fetch internal or private CodeQL packs
+      packages: read
+
+      # only required for workflows in private repositories
+      actions: read
+      contents: read
+    outputs:
+      languages-matrix: ${{ steps.set-matrix.outputs.languages }}
+      full-matrix: ${{ steps.make-matrix.outputs.matrix }}
+    steps:
+      - name: Get languages from repo
+        id: set-matrix
+        uses: advanced-security/set-codeql-language-matrix@v1.3.0
+        with:
+          access-token: ${{ secrets.GITHUB_TOKEN }}
+          endpoint: ${{ github.event.repository.languages_url }}
+      - name: Build language/build-mode matrix
+        id: make-matrix
+        shell: bash
+        run: |
+          raw='${{ steps.set-matrix.outputs.languages }}'
+          echo "Detected languages: $raw"
+          # Ensure valid JSON (the action already returns JSON array like ["javascript","java"])
+          # Construct objects assigning build-mode manual for kotlin, swift, and go; none otherwise.
+          matrix=$(echo "$raw" | jq -c '[ .[] | {language: ., "build-mode": (if . == "kotlin" or . == "swift" or . == "go" then "manual" else "none" end) } ]')
+          echo "Computed matrix: $matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          
+  analyze:
+    needs: create-matrix
+    if: ${{ needs.create-matrix.outputs.languages-matrix != '[]' }}
+    name: Analyze
+    runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.create-matrix.outputs.full-matrix) }}
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v5
+
+    # Initializes the CodeQL tools for scanning.
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ matrix.language }}
+        build-mode: ${{ matrix['build-mode'] }}
+
+    - if: ${{ matrix['build-mode'] == 'manual' }}
+      shell: bash
+      run: |
+        echo 'Manual build-mode selected. Insert your build commands below:'
+        echo 'Example:'
+        echo '  ./gradlew build   # for Kotlin'
+        echo '  go build ./...    # for Go'
+        echo '  xcodebuild ...    # for Swift'
+        echo 'Currently this step is a placeholder and does not fail.'
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{matrix.language}}"
